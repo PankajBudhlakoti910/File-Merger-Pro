@@ -1,3 +1,9 @@
+import subprocess
+import sys
+
+# Force install required packages — fixes Streamlit Cloud environment issues
+subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl==3.1.5", "xlrd==2.0.1", "et-xmlfile", "-q"], check=False)
+
 import streamlit as st
 import pandas as pd
 import numpy as np
