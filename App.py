@@ -254,6 +254,41 @@ def back_button(target_step, label="← Back"):
 # ─────────────────────────────────────────
 # STEP 1 – UPLOAD
 # ─────────────────────────────────────────
+def read_file_safe(uploaded_file):
+    """Read uploaded file — uses same logic as original working code."""
+    try:
+        filename = uploaded_file.name
+        file_ext = os.path.splitext(filename)[1].lower()
+
+        if file_ext == '.csv':
+            return filename, pd.read_csv(uploaded_file)
+        elif file_ext in ['.xlsx', '.xls']:
+            return filename, pd.read_excel(uploaded_file)
+        elif file_ext == '.json':
+            return filename, pd.read_json(uploaded_file)
+        elif file_ext == '.txt':
+            content = uploaded_file.getvalue().decode('utf-8')
+            try:
+                return filename, pd.read_csv(io.StringIO(content), sep=',')
+            except:
+                try:
+                    return filename, pd.read_csv(io.StringIO(content), sep='\t')
+                except:
+                    return filename, pd.read_csv(io.StringIO(content), sep=None, engine='python')
+        else:
+            try:
+                return filename, pd.read_csv(uploaded_file)
+            except:
+                try:
+                    return filename, pd.read_excel(uploaded_file)
+                except:
+                    content = uploaded_file.getvalue().decode('utf-8')
+                    return filename, pd.read_csv(io.StringIO(content), sep=None, engine='python')
+    except Exception as e:
+        st.warning(f"Could not read {uploaded_file.name}: {str(e)}")
+        return uploaded_file.name, None
+
+
 def render_upload():
     st.markdown("""
     <div class="step-card">
@@ -269,24 +304,40 @@ def render_upload():
     )
 
     if files:
-        with st.spinner("Reading files…"):
-            dfs = {}
+        # Only re-read if the file list has changed
+        current_names = [f.name for f in files]
+        cached_names  = [f.name for f in st.session_state.get('uploaded_files', [])]
+
+        if current_names != cached_names or not st.session_state.file_dataframes:
+            dfs    = {}
             errors = []
-            for f in files:
-                df = read_file(f)
+            total  = len(files)
+
+            progress_text = st.empty()
+            progress_bar  = st.progress(0)
+
+            for i, f in enumerate(files):
+                progress_text.markdown(f"⏳ Reading **{i+1}/{total}** — `{f.name}`")
+                progress_bar.progress((i + 1) / total)
+                name, df = read_file_safe(f)
                 if df is not None:
-                    dfs[f.name] = df
+                    dfs[name] = df
                 else:
-                    errors.append(f.name)
+                    errors.append(name)
 
-        if errors:
-            st.warning(f"Could not read: {', '.join(errors)}")
+            progress_bar.empty()
+            progress_text.empty()
 
-        if dfs:
-            st.session_state.uploaded_files = files
+            st.session_state.uploaded_files  = files
             st.session_state.file_dataframes = dfs
 
-            st.success(f"✅ {len(dfs)} file(s) read successfully!")
+            if errors:
+                st.warning("⚠️ Could not read: " + ", ".join(errors))
+        else:
+            dfs = st.session_state.file_dataframes
+
+        if dfs:
+            st.success(f"✅ {len(dfs)} file(s) loaded!")
 
             with st.expander(f"📋 File Summary ({len(dfs)} files)", expanded=True):
                 rows = []
@@ -357,10 +408,10 @@ def render_column_mapping():
     st.markdown("""
     <div class="step-card">
         <h2>🔗 STEP 2: Column Mapping</h2>
-        <p>Review automatic column mapping. Manually adjust or skip/create columns as needed.</p>
+        <p>Review automatic mapping. Manually adjust, skip, or remap columns as needed.</p>
     </div>""", unsafe_allow_html=True)
 
-    dfs   = st.session_state.file_dataframes
+    dfs    = st.session_state.file_dataframes
     fnames = list(dfs.keys())
 
     if not dfs:
@@ -368,128 +419,138 @@ def render_column_mapping():
         back_button(1)
         return
 
-    auto = build_auto_mapping(dfs)
-
-    # All unique (normalised) column names
-    all_norm = sorted(auto.keys())
-
-    # Columns present in ALL files
+    auto         = build_auto_mapping(dfs)
     full_cols    = [n for n, v in auto.items() if len(v['files']) == len(fnames)]
     partial_cols = [n for n, v in auto.items() if 0 < len(v['files']) < len(fnames)]
 
     st.info(
         f"🗂️ **{len(fnames)} files** | "
-        f"**{len(full_cols)}** columns present in all files | "
-        f"**{len(partial_cols)}** columns present in some files"
+        f"✅ **{len(full_cols)}** columns in ALL files (auto-mapped) | "
+        f"⚠️ **{len(partial_cols)}** columns in SOME files (need decision)"
     )
 
+    # ── TAB 1: Auto-mapped ──────────────────────────────────────────────────
     tab1, tab2 = st.tabs(["✅ Auto-Mapped Columns", "⚠️ Partial / Unmapped Columns"])
-
-    mapping_config = {}  # {target_col: {fname: source_col or None}}
 
     with tab1:
         if not full_cols:
             st.info("No columns are common across all files.")
         else:
             st.success(
-                f"**{len(full_cols)} columns** automatically matched across all files "
-                f"(after lowercasing + removing special characters)."
+                f"**{len(full_cols)} columns** automatically matched "
+                f"(lowercase + special chars removed before comparison)."
             )
-            st.caption(
-                "💡 **Matching rule:** column names are normalised — "
-                "lowercased and all special characters (spaces, hyphens, brackets, etc.) "
-                "replaced with `_` — before comparison. "
-                "E.g. `First Name`, `first_name`, and `First-Name!` all match as `first_name`."
-            )
+            st.caption("✎ = original name in that file differs from the canonical name.")
             rows = []
             for n in full_cols:
-                v = auto[n]
-                row = {
-                    "Target Column (canonical)": v['canonical'],
-                    "Normalised Key": v['norm'],
-                }
+                v   = auto[n]
+                row = {"Target Column": v['canonical'], "Normalised Key": v['norm']}
                 for fn in fnames:
-                    orig = v['files'].get(fn, "—")
-                    row[fn] = orig if orig == v['canonical'] else f"{orig} ✎"
+                    orig      = v['files'].get(fn, "—")
+                    row[fn]   = orig if orig == v['canonical'] else f"{orig} ✎"
                 rows.append(row)
-                mapping_config[v['canonical']] = {fn: v['files'].get(fn) for fn in fnames}
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.caption("✎ = original column name in that file differs from the canonical name shown.")
 
+    # ── TAB 2: Partial columns ──────────────────────────────────────────────
     with tab2:
         if not partial_cols:
-            st.success("All columns are present in every file – no manual mapping needed!")
+            st.success("All columns are present in every file — no manual mapping needed!")
         else:
             st.warning(
-                "The columns below are **not present in every file**. "
-                "Choose an action for each: **Map**, **Create Empty**, or **Skip**."
+                f"**{len(partial_cols)} columns** are missing from some files. "
+                "Choose **Include** (fill blanks) or **Skip** for each."
             )
-            partial_decisions = {}
 
+            # Show ALL partial columns in a compact table first
+            summary_rows = []
             for n in partial_cols:
-                v        = auto[n]
-                canon    = v['canonical']
-                present  = v['files']   # {fname: actual_col}
-                missing  = [fn for fn in fnames if fn not in present]
+                v = auto[n]
+                summary_rows.append({
+                    "Column": v['canonical'],
+                    "Present in": f"{len(v['files'])}/{len(fnames)} files",
+                    "Missing from": ", ".join([fn for fn in fnames if fn not in v['files']])[:80]
+                })
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-                with st.expander(f"📌 **{canon}**  —  present in {len(present)}/{len(fnames)} files"):
-                    col_a, col_b = st.columns([3, 2])
-                    with col_a:
-                        st.write("**Present in:**")
-                        for fn, ac in present.items():
-                            st.markdown(f"- `{fn}` → `{ac}`")
-                        if missing:
-                            st.write("**Missing from:**")
-                            for fn in missing:
-                                st.markdown(f"- `{fn}`")
+            st.markdown("#### ⚙️ Set action for each partial column:")
 
-                    with col_b:
-                        action = st.radio(
+            # Use columns layout — 3 per row — for compact display
+            for i in range(0, len(partial_cols), 3):
+                chunk = partial_cols[i:i+3]
+                cols  = st.columns(len(chunk))
+                for col_widget, n in zip(cols, chunk):
+                    v     = auto[n]
+                    canon = v['canonical']
+                    with col_widget:
+                        st.markdown(f"**`{canon}`**")
+                        st.caption(f"In {len(v['files'])}/{len(fnames)} files")
+                        st.radio(
                             "Action",
-                            ["Include (fill missing with blank)", "Skip this column"],
+                            ["Include (fill blank)", "Skip"],
                             key=f"action_{n}",
-                            horizontal=False
+                            horizontal=True,
+                            label_visibility="collapsed"
                         )
 
-                        # Manual remap for files that have a differently-named column
-                        remap = {}
-                        for fn in missing:
-                            other_cols = [c for c in dfs[fn].columns if c not in [v2['canonical'] for v2 in auto.values() if fn in v2['files']]]
-                            if other_cols:
-                                choice = st.selectbox(
-                                    f"Map from `{fn}`",
-                                    ["— leave blank —"] + other_cols,
-                                    key=f"remap_{n}_{fn}"
-                                )
-                                if choice != "— leave blank —":
-                                    remap[fn] = choice
-
-                        partial_decisions[canon] = {
-                            'action': action,
-                            'present': present,
-                            'remap': remap
-                        }
-
-            # Build mapping_config for partial columns
-            for canon, dec in partial_decisions.items():
-                if "Skip" in dec['action']:
+            # Remap section — only for columns marked Include that have missing files
+            st.markdown("#### 🔗 Optional: remap missing columns from another column")
+            st.caption("For files missing a column, you can pull data from a differently-named column instead of leaving it blank.")
+            for n in partial_cols:
+                if st.session_state.get(f"action_{n}", "Include (fill blank)") == "Skip":
                     continue
-                mapping_config[canon] = {}
-                for fn in fnames:
-                    if fn in dec['present']:
-                        mapping_config[canon][fn] = dec['present'][fn]
-                    elif fn in dec['remap']:
-                        mapping_config[canon][fn] = dec['remap'][fn]
-                    else:
-                        mapping_config[canon][fn] = None  # fill blank
+                v       = auto[n]
+                canon   = v['canonical']
+                missing = [fn for fn in fnames if fn not in v['files']]
+                if not missing:
+                    continue
+                with st.expander(f"Remap for **{canon}** ({len(missing)} missing files)"):
+                    for fn in missing:
+                        mapped_cols = {v2['canonical'] for v2 in auto.values() if fn in v2['files']}
+                        other_cols  = [c for c in dfs[fn].columns if c not in mapped_cols]
+                        if other_cols:
+                            st.selectbox(
+                                f"`{fn}` → map from:",
+                                ["— leave blank —"] + other_cols,
+                                key=f"remap_{n}_{fn}"
+                            )
+                        else:
+                            st.caption(f"`{fn}` — no unmapped columns available, will fill blank.")
 
-    # Store mapping and proceed
+    # ── Build final mapping_config and save immediately ─────────────────────
+    mapping_config = {}
+
+    # All auto-mapped columns always included
+    for n in full_cols:
+        v = auto[n]
+        mapping_config[v['canonical']] = {fn: v['files'][fn] for fn in fnames}
+
+    # Partial columns based on user choices
+    for n in partial_cols:
+        v      = auto[n]
+        canon  = v['canonical']
+        action = st.session_state.get(f"action_{n}", "Include (fill blank)")
+        if "Skip" in action:
+            continue
+        mapping_config[canon] = {}
+        for fn in fnames:
+            if fn in v['files']:
+                mapping_config[canon][fn] = v['files'][fn]
+            else:
+                remap_key = f"remap_{n}_{fn}"
+                choice    = st.session_state.get(remap_key, "— leave blank —")
+                mapping_config[canon][fn] = choice if choice != "— leave blank —" else None
+
+    # Always persist current mapping to session state (even before button click)
+    st.session_state.column_mapping = mapping_config
+
+    st.markdown("---")
+    st.info(f"✅ **{len(mapping_config)} columns** will be in the merged output.")
+
     col1, col2 = st.columns(2)
     with col1:
         back_button(1, "← Back to Upload")
     with col2:
         if st.button("Next: Configure Merge →", type="primary", use_container_width=True):
-            st.session_state.column_mapping = mapping_config
             st.session_state.step = 3
             st.rerun()
 
