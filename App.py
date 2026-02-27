@@ -320,34 +320,63 @@ def render_upload():
         if current_names != cached_names or not st.session_state.file_dataframes:
             dfs    = {}
             errors = []
+            total  = len(files)
 
             progress_text = st.empty()
             progress_bar  = st.progress(0)
-            total = len(files)
 
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            with ThreadPoolExecutor(max_workers=min(8, total)) as executor:
-                futures = {executor.submit(read_file_safe, f): f.name for f in files}
-                done = 0
-                for future in as_completed(futures):
-                    name, df = future.result()
-                    done += 1
-                    progress_bar.progress(done / total)
-                    progress_text.markdown(f"⏳ Reading files… **{done}/{total}** — `{name}`")
-                    if df is not None:
-                        dfs[name] = df
+            # Read sequentially in main thread — openpyxl is NOT thread-safe
+            for i, f in enumerate(files):
+                progress_text.markdown(f"⏳ Reading **{i+1}/{total}** — `{f.name}`")
+                progress_bar.progress((i + 1) / total)
+                name = f.name
+                ext  = os.path.splitext(name)[1].lower()
+                try:
+                    raw = f.read()
+                    buf = io.BytesIO(raw)
+                    if ext == '.csv':
+                        df = pd.read_csv(buf)
+                    elif ext == '.xlsx':
+                        df = pd.read_excel(buf, engine='openpyxl')
+                    elif ext == '.xls':
+                        try:
+                            df = pd.read_excel(buf, engine='xlrd')
+                        except Exception:
+                            buf.seek(0)
+                            df = pd.read_excel(buf, engine='openpyxl')
+                    elif ext == '.json':
+                        df = pd.read_json(buf)
+                    elif ext == '.txt':
+                        content = raw.decode('utf-8', errors='replace')
+                        df = None
+                        for sep in (',', '\t', '|', ';'):
+                            try:
+                                tmp = pd.read_csv(io.StringIO(content), sep=sep)
+                                if tmp.shape[1] > 1:
+                                    df = tmp
+                                    break
+                            except Exception:
+                                pass
+                        if df is None:
+                            df = pd.read_csv(io.StringIO(content), sep=None, engine='python')
                     else:
-                        errors.append(name)
+                        try:
+                            df = pd.read_csv(buf)
+                        except Exception:
+                            buf.seek(0)
+                            df = pd.read_excel(buf, engine='openpyxl')
+                    dfs[name] = df
+                except Exception as e:
+                    errors.append(f"{name}: {e}")
 
             progress_bar.empty()
             progress_text.empty()
 
-            st.session_state.uploaded_files   = files
-            st.session_state.file_dataframes  = dfs
+            st.session_state.uploaded_files  = files
+            st.session_state.file_dataframes = dfs
 
             if errors:
-                st.warning(f"⚠️ Could not read: {', '.join(errors)}")
+                st.warning("⚠️ Could not read:\n" + "\n".join(errors))
         else:
             dfs = st.session_state.file_dataframes
 
