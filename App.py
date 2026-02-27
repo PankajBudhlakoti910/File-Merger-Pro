@@ -1,3 +1,6 @@
+import subprocess
+subprocess.run(["pip", "install", "openpyxl", "xlrd", "-q"], check=False)
+
 import streamlit as st
 import pandas as pd
 import numpy as np
