@@ -264,8 +264,14 @@ def read_file_safe(f):
         buf = io.BytesIO(raw)
         if ext == '.csv':
             df = pd.read_csv(buf)
-        elif ext in ('.xlsx', '.xls'):
-            df = pd.read_excel(buf, engine='openpyxl' if ext == '.xlsx' else 'xlrd')
+        elif ext == '.xlsx':
+            df = pd.read_excel(buf, engine='openpyxl')
+        elif ext == '.xls':
+            try:
+                df = pd.read_excel(buf, engine='xlrd')
+            except Exception:
+                buf.seek(0)
+                df = pd.read_excel(buf, engine='openpyxl')
         elif ext == '.json':
             df = pd.read_json(buf)
         elif ext == '.txt':
@@ -286,7 +292,7 @@ def read_file_safe(f):
                 df = pd.read_csv(buf)
             except Exception:
                 buf.seek(0)
-                df = pd.read_excel(buf)
+                df = pd.read_excel(buf, engine='openpyxl')
         return name, df
     except Exception as e:
         return name, None
